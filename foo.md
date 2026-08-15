@@ -1,36 +1,63 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DEST_DIR="${1:-./antigravity-ui}"
-ARCH="${2:-x64}" # x64 or arm64
+ARCH="${1:-amd64}" # amd64 (x64) or arm64
+OUT_DIR="${2:-./antigravity-dist}"
 
-mkdir -p "${DEST_DIR}"
-cd "${DEST_DIR}"
+mkdir -p "${OUT_DIR}"
+cd "${OUT_DIR}"
 
-RELEASES_API="https://antigravity-auto-updater-974169037036.us-central1.run.app/releases"
+APT_BASE="https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev"
+INDEX_URL="${APT_BASE}/dists/antigravity-debian/main/binary-${ARCH}/Packages"
 
-echo "==> [1/4] Fetching latest Antigravity Desktop UI release metadata..."
-RELEASES_JSON=$(curl -fsSL "${RELEASES_API}")
+echo "[1/4] Fetching latest release metadata from APT index..."
+INDEX_DATA=$(curl -fsSL "${INDEX_URL}")
 
-# Automatically extract the latest version & build ID
-LATEST_VERSION=$(echo "${RELEASES_JSON}" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data[0]['version'])")
-LATEST_BUILD_ID=$(echo "${RELEASES_JSON}" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data[0]['execution_id'])")
+# Parse latest Version and Package Path
+LATEST_VERSION_LINE=$(echo "${INDEX_DATA}" | awk -F': ' '/^Version:/ {print $2}' | tail -n1)
+LATEST_FILE_PATH=$(echo "${INDEX_DATA}" | awk -F': ' '/^Filename:/ {print $2}' | tail -n1)
 
-echo "    Found Latest UI Release: ${LATEST_VERSION} (Build ID: ${LATEST_BUILD_ID})"
+VERSION=$(echo "${LATEST_VERSION_LINE}" | cut -d'-' -f1)
+BUILD_ID=$(echo "${LATEST_VERSION_LINE}" | cut -d'-' -f2)
+FOLDER_ARCH=$([ "$ARCH" = "amd64" ] && echo "x64" || echo "arm64")
 
-# Fetch release manifest
-MANIFEST_URL="https://storage.googleapis.com/antigravity-public/antigravity-hub/${LATEST_VERSION}-${LATEST_BUILD_ID}/linux-${ARCH}/manifest.json"
-echo "==> [2/4] Verifying release manifest (${MANIFEST_URL})..."
-curl -fsSL "${MANIFEST_URL}" | python3 -m json.tool
+echo "  -> Version: ${VERSION}, Build ID: ${BUILD_ID}"
+echo "  -> Package: ${LATEST_FILE_PATH}"
 
-TARBALL_URL="https://storage.googleapis.com/antigravity-public/antigravity-hub/${LATEST_VERSION}-${LATEST_BUILD_ID}/linux-${ARCH}/Antigravity.tar.gz"
-TARBALL_FILE="Antigravity-UI-${LATEST_VERSION}-${LATEST_BUILD_ID}-linux-${ARCH}.tar.gz"
+# Download from Google Artifact Registry
+DEB_URL="${APT_BASE}/${LATEST_FILE_PATH}"
+DEB_FILENAME=$(basename "${LATEST_FILE_PATH}")
 
-echo "==> [3/4] Downloading UI tarball: ${TARBALL_URL}..."
-curl -fL --progress-bar -o "${TARBALL_FILE}" "${TARBALL_URL}"
+echo "[2/4] Downloading package from Google Artifact Registry..."
+curl -fL --progress-bar -o "${DEB_FILENAME}" "${DEB_URL}"
 
-echo "==> [4/4] Extracting tarball..."
-mkdir -p "Antigravity-UI-${LATEST_VERSION}"
-tar -xzf "${TARBALL_FILE}" -C "Antigravity-UI-${LATEST_VERSION}"
+# Extract application payload
+echo "[3/4] Extracting Desktop UI files..."
+TMP_UNPACK="_unpack_tmp"
+rm -rf "${TMP_UNPACK}"
+mkdir -p "${TMP_UNPACK}"
 
-echo "✓ Successfully downloaded and extracted Antigravity UI!"
+(
+    cd "${TMP_UNPACK}"
+    ar -x "../${DEB_FILENAME}"
+    if [ -f data.tar.xz ]; then
+        tar -xf data.tar.xz
+    elif [ -f data.tar.gz ]; then
+        tar -xzf data.tar.gz
+    elif [ -f data.tar.zst ]; then
+        tar --zstd -xf data.tar.zst
+    fi
+)
+
+TARGET_FOLDER="Antigravity-${FOLDER_ARCH}"
+rm -rf "${TARGET_FOLDER}"
+mv "${TMP_UNPACK}/usr/share/antigravity" "${TARGET_FOLDER}"
+rm -rf "${TMP_UNPACK}"
+
+# Create standard tar.gz distribution archive
+echo "[4/4] Generating Antigravity.tar.gz..."
+TARBALL_NAME="Antigravity-${VERSION}-${BUILD_ID}-linux-${FOLDER_ARCH}.tar.gz"
+tar -czf "${TARBALL_NAME}" "${TARGET_FOLDER}"
+ln -sf "${TARBALL_NAME}" "Antigravity.tar.gz"
+
+echo "✓ Done! Created ${OUT_DIR}/${TARBALL_NAME} and ${OUT_DIR}/${TARGET_FOLDER}"
